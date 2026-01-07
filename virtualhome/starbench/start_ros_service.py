@@ -11,9 +11,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 # Simulation
-sys.path.append('../simulation')
+import os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+simulation_path = os.path.join(current_dir, '../simulation')
+sys.path.append(simulation_path)
+# import pdb; pdb.set_trace()
 from unity_simulator.comm_unity import UnityCommunication
-from unity_simulator import utils_viz
 from ros_utils import *
 from utils_demo import *
 from graph_utils import *
@@ -59,6 +62,26 @@ def parse_args():
     parser.add_argument('--port', type=str, required=True, help='Port for Unity communication')
     # parser.add_argument("--graph_path", type=str, required=True, help="Path to the scene graph")
     return parser.parse_args()
+
+def initialize_services(port="8080"):
+    """
+    Initialize globals so functions can work when imported.
+    """
+    global comm, vlm, prefab_classes, class_list
+    
+    # Load metadata (adjust path relative to this file)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    resources_path = os.path.join(current_dir, "../resources/PrefabClass.json")
+    
+    prefab_classes, class_list = load_prefab_metadata(resources_path)
+    
+    comm = UnityCommunication(port=port)
+    comm.timeout_wait = 300
+    
+    # Initialize VLM if needed, or mock it
+    vlm = ChatOpenAI(model="o3", temperature=1, api_key=os.environ.get("OPENAI_API_KEY"))
+    
+    print("Services initialized via Import")
 
 ### Helper Functions ###
 def detect_objects_owlv2(query_image: Image, query_cls: str) -> SemanticObjectDetectionSrvResponse:
@@ -371,8 +394,8 @@ def _get_visible_instances(class_list: dict) -> set[str]:  # NEW: pass class_lis
     view_pil = display_grid_img(imgs + cls_imgs + inst_imgs, nrows=3)
     view_pil.save("../../outputs/debug_get_visible_instances.png")
 
-    success, graph = comm.environment_graph()
-    success, instance_colors = comm.instance_colors()
+    _, graph = comm.environment_graph()
+    _, instance_colors = comm.instance_colors()
     assert len(imgs) == len(cls_imgs) == len(inst_imgs), "Number of images mismatch"
 
     # Precompute per-node colors for fast matching  --------------------------  # NEW
@@ -426,8 +449,6 @@ def _get_visible_instances(class_list: dict) -> set[str]:  # NEW: pass class_lis
                 visible_instances.add(id2node[uid].get("prefab_name", f"id:{uid}"))
                 found = True
                 break
-
-            # (Optional) If you expect slight palette noise, switch to np.allclose(..., atol=2)
 
     return visible_instances
     
@@ -666,6 +687,7 @@ def _detect_objects(query_cls: List[str]):
     ok_inst, inst_imgs  = comm.camera_image(pano_camera_select, mode="seg_inst")
     ok_depth, depth_imgs= comm.camera_image(pano_camera_select, mode="depth")
     if not (ok_rgb and ok_cls and ok_inst and ok_depth) or not rgb_imgs:
+        import pdb; pdb.set_trace()
         return (set(), [])
 
     # 2) Debug montage
