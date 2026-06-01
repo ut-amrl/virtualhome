@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 import time
 from PIL import ImageDraw
@@ -8,10 +9,7 @@ import numpy as np
 import cv2
 
 # Simulation
-import os
-current_dir = os.path.dirname(os.path.abspath(__file__))
-simulation_path = os.path.join(current_dir, '../simulation')
-sys.path.append(simulation_path)
+sys.path.append('../simulation')
 from unity_simulator.comm_unity import (
     UnityCommunication,
     UnityEngineException,
@@ -23,32 +21,111 @@ from utils_demo import *
 from graph_utils import *
 
 ## ROS Service Calls
-import rospy
-import roslib; roslib.load_manifest('amrl_msgs')
+import rclpy
+from rclpy.node import Node
 from amrl_msgs.srv import (
     GetImageSrv,
-    GetImageSrvResponse,
-    GetImageAtPoseSrv,
-    GetImageAtPoseSrvResponse,
-    PickObjectSrv,
-    PickObjectSrvResponse,
+    GetImageAtPoseSrv, 
+    PickObjectSrv, 
     GetVisibleObjectsSrv,
-    GetVisibleObjectsSrvResponse,
     FindObjectSrv,
-    FindObjectSrvResponse,
     SemanticObjectDetectionSrv,
-    SemanticObjectDetectionSrvRequest,
-    SemanticObjectDetectionSrvResponse,
     ChangeVirtualHomeGraphSrv,
-    ChangeVirtualHomeGraphSrvResponse,
     DetectVirtualHomeObjectSrv,
-    DetectVirtualHomeObjectSrvRequest,
-    DetectVirtualHomeObjectSrvResponse,
     OpenVirtualHomeObjectSrv,
-    OpenVirtualHomeObjectSrvRequest,
-    OpenVirtualHomeObjectSrvResponse,
 )
 from geometry_msgs.msg import Point
+
+GetImageSrvResponse = GetImageSrv.Response
+GetImageAtPoseSrvResponse = GetImageAtPoseSrv.Response
+PickObjectSrvResponse = PickObjectSrv.Response
+GetVisibleObjectsSrvResponse = GetVisibleObjectsSrv.Response
+FindObjectSrvResponse = FindObjectSrv.Response
+SemanticObjectDetectionSrvRequest = SemanticObjectDetectionSrv.Request
+SemanticObjectDetectionSrvResponse = SemanticObjectDetectionSrv.Response
+ChangeVirtualHomeGraphSrvResponse = ChangeVirtualHomeGraphSrv.Response
+DetectVirtualHomeObjectSrvRequest = DetectVirtualHomeObjectSrv.Request
+DetectVirtualHomeObjectSrvResponse = DetectVirtualHomeObjectSrv.Response
+OpenVirtualHomeObjectSrvRequest = OpenVirtualHomeObjectSrv.Request
+OpenVirtualHomeObjectSrvResponse = OpenVirtualHomeObjectSrv.Response
+
+
+class _RospyShim:
+    ServiceException = Exception
+
+    def __init__(self):
+        self._node = None
+        self._services = []
+
+    def init_node(self, name: str, anonymous: bool = True):
+        if not rclpy.ok():
+            rclpy.init()
+        self._node = Node(name)
+
+    def wait_for_service(self, name: str):
+        return
+
+    def ServiceProxy(self, name: str, srv_type):
+        node = self._node
+        if node is None:
+            raise RuntimeError("ROS2 node is not initialized")
+        client = node.create_client(srv_type, name)
+        while not client.wait_for_service(timeout_sec=1.0):
+            self.logwarn(f"Waiting for service: {name}")
+
+        class _Proxy:
+            def __call__(self_inner, request):
+                future = client.call_async(request)
+                rclpy.spin_until_future_complete(node, future)
+                result = future.result()
+                if result is None:
+                    raise _RospyShim.ServiceException(f"Service call failed: {name}")
+                return result
+
+        return _Proxy()
+
+    def Service(self, name: str, srv_type, handler):
+        node = self._node
+        if node is None:
+            raise RuntimeError("ROS2 node is not initialized")
+
+        def _callback(request, response):
+            return handler(request)
+
+        service = node.create_service(srv_type, name, _callback)
+        self._services.append(service)
+        return service
+
+    def loginfo(self, msg: str):
+        if self._node is None:
+            print(msg)
+            return
+        self._node.get_logger().info(msg)
+
+    def logwarn(self, msg: str):
+        if self._node is None:
+            print(msg)
+            return
+        self._node.get_logger().warning(msg)
+
+    def logerr(self, msg: str):
+        if self._node is None:
+            print(msg)
+            return
+        self._node.get_logger().error(msg)
+
+    def spin(self):
+        if self._node is None:
+            raise RuntimeError("ROS2 node is not initialized")
+        try:
+            rclpy.spin(self._node)
+        finally:
+            self._node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+
+
+rospy = _RospyShim()
 
 comm = None
 class_list = None
@@ -100,25 +177,6 @@ def parse_args():
                              '../../outputs/debug_observe.png). Default off.')
     # parser.add_argument("--graph_path", type=str, required=True, help="Path to the scene graph")
     return parser.parse_args()
-
-def initialize_services(port="8080"):
-    """
-    Initialize globals so functions can work when imported.
-    (ROS1 affordance; not present in the ROS2 file.)
-    """
-    global comm, prefab_classes, class_list
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    resources_path = os.path.join(current_dir, "../resources/PrefabClass.json")
-
-    prefab_classes, class_list = load_prefab_metadata(resources_path)
-
-    comm = UnityCommunication(port=port)
-    comm.timeout_wait = 300
-
-    print("Services initialized via Import")
-
-
 
 
 def _camera_image_with_retry(camera_select, mode, attempts=2):
